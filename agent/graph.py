@@ -7,7 +7,7 @@ SIM_THRESHOLD = 0.65
 
 class AgentState(TypedDict):
     question: str
-    history: list[dict[str, str]]
+    history: list
     sources: list[SearchResult]
     context: str
     answer: str
@@ -16,49 +16,45 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
     def retrieve(state: AgentState) -> dict:
         sources = kb.search(state["question"], top_k=top_k)
         context_parts = []
-        for number, source in enumerate(sources, 1):
-            location = f"{source.source}，第{source.page}页" if source.page else source.source
-            context_parts.append(f"[{number}] 来源：{location}\n{source.text}")
+        for idx, source in enumerate(sources, 1):
+            page_info = f"第{source.page}页" if source.page else "无页码"
+            context_parts.append(f"[{idx}] 来源：{source.source}，{page_info}\n{source.text}")
         return {"sources": sources, "context": "\n\n".join(context_parts)}
 
     def route_after_retrieve(state: AgentState) -> Literal["gen_kb", "gen_fallback"]:
-        sources = state["sources"]
-        valid_sources = [s for s in sources if s.score >= SIM_THRESHOLD]
-        if len(valid_sources) > 0:
-            return "gen_kb"
-        else:
-            return "gen_fallback"
+        valid_docs = []
+        for doc in state["sources"]:
+            if hasattr(doc, "score"):
+                sim_score = doc.score
+            else:
+                sim_score = 1.0 - (doc.distance if doc.distance is not None else 1.0)
+            if sim_score >= SIM_THRESHOLD:
+                valid_docs.append(doc)
+        return "gen_kb" if len(valid_docs) > 0 else "gen_fallback"
 
     def gen_kb(state: AgentState) -> dict:
-        kb_prompt = f"""
-【引用本地知识库文档】
-严格仅依据下方知识库原文回答机械智造、SolidWorks相关问题，禁止编造工艺、建模参数。
-知识库参考内容：
+        prompt_text = f"""你是SolidWorks专业工程师，严格依据下面知识库内容回答，回答末尾标注资料来源编号。
+知识库检索内容：
 {state["context"]}
-用户提问：{state["question"]}
-回答要求：步骤清晰，所有操作、参数必须能在上述原文找到依据，回答中保留文档来源标记。
-"""
-        return {
-            "answer": llm.answer(
-                question=state["question"],
-                context=kb_prompt,
-                history=state["history"],
-            )
-        }
+用户问题：{state["question"]}
+输出条理清晰、可直接实操的分步方案。"""
+        model_ans = llm.chat(
+            question=state["question"],
+            context=prompt_text,
+            history=state["history"]
+        )
+        return {"answer": model_ans}
 
     def gen_fallback(state: AgentState) -> dict:
-        fallback_prompt = f"""
-【重要提示：本地知识库未检索到匹配内容，以下内容为DeepSeek V4 PRO通用行业标准操作，无本地实训资料支撑】
-仅输出SolidWorks软件原生标准操作流程，不得编造非标工艺参数；若涉及小众特种加工，主动说明无对应本地资料。
-用户提问：{state["question"]}
-"""
-        return {
-            "answer": llm.answer(
-                question=state["question"],
-                context=fallback_prompt,
-                history=state["history"],
-            )
-        }
+        prompt_text = f"""当前没有匹配的本地知识库资料，禁止提示用户上传/补充文档。
+你是资深SolidWorks工程师，直接依靠专业知识给出完整、可落地的分步操作、参数、避坑要点。
+用户提问：{state["question"]}"""
+        model_ans = llm.chat(
+            question=state["question"],
+            context=prompt_text,
+            history=state["history"]
+        )
+        return {"answer": model_ans}
 
     graph = StateGraph(AgentState)
     graph.add_node("retrieve", retrieve)
@@ -71,12 +67,8 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
     graph.add_conditional_edges(
         "route_after_retrieve",
         route_after_retrieve,
-        {
-            "gen_kb": "gen_kb",
-            "gen_fallback": "gen_fallback"
-        }
+        {"gen_kb": "gen_kb", "gen_fallback": "gen_fallback"}
     )
     graph.add_edge("gen_kb", END)
     graph.add_edge("gen_fallback", END)
-
     return graph.compile()
