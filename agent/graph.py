@@ -1,4 +1,4 @@
-from typing import TypedDict, Literal
+from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 from llm.client import CloudLLM
 from rag.vector_store import KnowledgeBase, SearchResult
@@ -21,12 +21,10 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
             context_parts.append(f"[{idx}] 来源：{source.source}，{page_info}\n{source.text}")
         return {"sources": sources, "context": "\n\n".join(context_parts)}
 
-    def route_after_retrieve(state: AgentState) -> dict:
-        # 如果知识库为空（没有检索到任何文档），直接走 gen_fallback
+    def route_after_retrieve(state: AgentState) -> str:   # 返回字符串
+        # 如果知识库为空，直接走 fallback
         if not state.get("sources"):
-            return {"next_node": "gen_fallback"}
-        
-        # 否则检查相似度阈值
+            return "gen_fallback"
         valid_docs = []
         for doc in state["sources"]:
             if hasattr(doc, "score"):
@@ -35,9 +33,7 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
                 sim_score = 1.0 - (doc.distance if doc.distance is not None else 1.0)
             if sim_score >= SIM_THRESHOLD:
                 valid_docs.append(doc)
-        
-        next_node = "gen_kb" if len(valid_docs) > 0 else "gen_fallback"
-        return {"next_node": next_node}
+        return "gen_kb" if valid_docs else "gen_fallback"
 
     def gen_kb(state: AgentState) -> dict:
         prompt_text = f"""你是SolidWorks专业工程师，严格依据下面知识库内容回答，回答末尾标注资料来源编号。
@@ -71,7 +67,7 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
     graph.add_edge(START, "retrieve")
     graph.add_conditional_edges(
         "retrieve",
-        route_after_retrieve,
+        route_after_retrieve,          # 这个函数现在返回字符串
         {"gen_kb": "gen_kb", "gen_fallback": "gen_fallback"}
     )
     graph.add_edge("gen_kb", END)
