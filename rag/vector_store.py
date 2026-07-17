@@ -1,15 +1,11 @@
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-
 from rag.splitter import Chunk
 
-
 COLLECTION_NAME = "solidworks_knowledge"
-
 
 @dataclass(frozen=True)
 class SearchResult:
@@ -17,7 +13,7 @@ class SearchResult:
     source: str
     page: int | None
     distance: float | None
-
+    score: float  # 新增：0~1相似度分数，越大越匹配
 
 class KnowledgeBase:
     def __init__(self, persist_dir: Path, embedding_model: str):
@@ -56,12 +52,31 @@ class KnowledgeBase:
         documents = result.get("documents", [[]])[0]
         metadatas = result.get("metadatas", [[]])[0]
         distances = result.get("distances", [[]])[0]
-        return [
-            SearchResult(
+
+        # SolidWorks专业关键词加权
+        boost_keywords = ["拉伸凸台", "拔模角度", "拔模", "拉伸特征", "配合约束", "干涉检查", "工程图"]
+        query_lower = query.lower()
+
+        output = []
+        for i, (text, meta) in enumerate(zip(documents, metadatas)):
+            dist = distances[i] if i < len(distances) else 1.0
+            # 余弦距离转基础相似度 0~1
+            base_sim = 1.0 - dist
+            doc_lower = text.lower()
+            boost = 0.0
+            # 命中关键词加分
+            for kw in boost_keywords:
+                if kw in query_lower and kw in doc_lower:
+                    boost += 0.12
+            # 最终综合相似度，限制最大1.0
+            final_score = min(base_sim + boost, 1.0)
+
+            page_val = None if meta.get("page", -1) == -1 else int(meta["page"])
+            output.append(SearchResult(
                 text=text,
                 source=meta["source"],
-                page=None if meta.get("page", -1) == -1 else int(meta["page"]),
-                distance=distances[i] if i < len(distances) else None,
-            )
-            for i, (text, meta) in enumerate(zip(documents, metadatas))
-        ]
+                page=page_val,
+                distance=dist,
+                score=final_score
+            ))
+        return output
