@@ -21,7 +21,12 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
             context_parts.append(f"[{idx}] 来源：{source.source}，{page_info}\n{source.text}")
         return {"sources": sources, "context": "\n\n".join(context_parts)}
 
-    def route_after_retrieve(state: AgentState) -> Literal["gen_kb", "gen_fallback"]:
+    def route_after_retrieve(state: AgentState) -> dict:
+        # 如果知识库为空（没有检索到任何文档），直接走 gen_fallback
+        if not state.get("sources"):
+            return {"next_node": "gen_fallback"}
+        
+        # 否则检查相似度阈值
         valid_docs = []
         for doc in state["sources"]:
             if hasattr(doc, "score"):
@@ -30,7 +35,9 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
                 sim_score = 1.0 - (doc.distance if doc.distance is not None else 1.0)
             if sim_score >= SIM_THRESHOLD:
                 valid_docs.append(doc)
-        return "gen_kb" if len(valid_docs) > 0 else "gen_fallback"
+        
+        next_node = "gen_kb" if len(valid_docs) > 0 else "gen_fallback"
+        return {"next_node": next_node}
 
     def gen_kb(state: AgentState) -> dict:
         prompt_text = f"""你是SolidWorks专业工程师，严格依据下面知识库内容回答，回答末尾标注资料来源编号。
@@ -58,14 +65,12 @@ def build_agent(kb: KnowledgeBase, llm: CloudLLM, top_k: int):
 
     graph = StateGraph(AgentState)
     graph.add_node("retrieve", retrieve)
-    graph.add_node("route_after_retrieve", route_after_retrieve)
     graph.add_node("gen_kb", gen_kb)
     graph.add_node("gen_fallback", gen_fallback)
 
     graph.add_edge(START, "retrieve")
-    graph.add_edge("retrieve", "route_after_retrieve")
     graph.add_conditional_edges(
-        "route_after_retrieve",
+        "retrieve",
         route_after_retrieve,
         {"gen_kb": "gen_kb", "gen_fallback": "gen_fallback"}
     )
